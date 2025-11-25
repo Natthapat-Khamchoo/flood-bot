@@ -5,7 +5,7 @@ import gspread
 from oauth2client.service_account import ServiceAccountCredentials
 import google.generativeai as genai
 from duckduckgo_search import DDGS
-from datetime import datetime
+from datetime import datetime, timedelta  # <--- เพิ่ม timedelta
 
 # ================= CONFIGURATION =================
 # ดึงค่าจาก GitHub Secrets
@@ -116,32 +116,33 @@ def analyze_with_ai(text):
 
 # ================= MAIN LOOP =================
 
+# ... (ส่วน Import ด้านบน อย่าลืมเพิ่ม timedelta นะครับ) ...
+
 def main():
-    print("🚀 เริ่มต้นระบบ Flood Rescue Bot V2.0")
+    print("🚀 เริ่มต้นระบบ Flood Rescue Bot V2.1 (GMT+7)")
     
-    # ---------------------------------------------------------
-    # 1. TEST CONNECTION (ทดสอบส่งข้อความทันทีเมื่อรัน)
-    # ถ้าเห็นข้อความนี้ในมือถือ แปลว่า Chat ID / Token ถูกต้องแน่นอน
-    # ---------------------------------------------------------
+    # คำนวณเวลาไทย
+    thai_time = datetime.utcnow() + timedelta(hours=7)
+    
+    # 1. TEST CONNECTION
     print("🧪 กำลังส่งข้อความทดสอบระบบ...")
-    send_telegram(f"✅ **SYSTEM CHECK:** บอทเริ่มทำงานแล้ว ณ เวลา {datetime.now().strftime('%H:%M:%S')}\n(ถ้าเห็นข้อความนี้แสดงว่าการเชื่อมต่อถูกต้องครับ)")
+    send_telegram(f"✅ **SYSTEM CHECK:** บอททำงาน ณ เวลา {thai_time.strftime('%H:%M:%S')} (เวลาไทย)")
 
     # 2. เตรียม Google Sheet
     sheet = get_sheet()
     existing_ids = []
     if sheet:
         try:
-            existing_ids = sheet.col_values(1) # อ่าน ID ที่เคยส่งแล้ว
+            existing_ids = sheet.col_values(1)
             print(f"📚 ฐานข้อมูลเดิมมี: {len(existing_ids)} รายการ")
         except:
-            print("⚠️ อ่าน Sheet ไม่ได้ อาจเป็นชีทเปล่า")
+            print("⚠️ อ่าน Sheet ไม่ได้")
 
     # 3. เริ่มค้นหา
     posts = search_social_media()
 
     # 4. วนลูปวิเคราะห์
     for post in posts:
-        # ข้ามถ้าเคยส่งแล้ว
         if post['id'] in existing_ids:
             continue
             
@@ -151,11 +152,12 @@ def main():
         if analysis and analysis.get('is_rescue'):
             print(f"🚨 >> เจอเคสช่วยเหลือ! ที่: {analysis.get('location')}")
             
-            # เตรียมข้อมูล
             loc = analysis.get('location') or "ไม่ระบุ"
             con = analysis.get('contact') or "-"
             need = analysis.get('needs') or "-"
-            timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            
+            # ใช้เวลาไทยตรงนี้
+            timestamp = (datetime.utcnow() + timedelta(hours=7)).strftime("%Y-%m-%d %H:%M:%S")
 
             # ส่ง Alert
             msg = (
@@ -175,7 +177,7 @@ def main():
                 except Exception as e:
                     print(f"❌ บันทึก Sheet ไม่ได้: {e}")
             
-            time.sleep(1) # กัน Telegram บล็อกเพราะส่งรัว
+            time.sleep(1)
         else:
             print("   -> ไม่ใช่เคสช่วยเหลือ (ข้าม)")
 
@@ -183,3 +185,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
