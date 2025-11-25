@@ -1,118 +1,185 @@
 import os
+import time
+import requests
 import gspread
 from oauth2client.service_account import ServiceAccountCredentials
-import requests
-import time
 import google.generativeai as genai
-from datetime import datetime
 from duckduckgo_search import DDGS
+from datetime import datetime
 
-# --- รับค่าจาก GitHub Secrets ---
+# ================= CONFIGURATION =================
+# ดึงค่าจาก GitHub Secrets
 TELEGRAM_TOKEN = os.getenv('TELEGRAM_TOKEN')
 CHAT_ID = os.getenv('CHAT_ID')
 GENAI_API_KEY = os.getenv('GENAI_API_KEY')
 SHEET_NAME = 'Flood_Rescue_Data'
-CREDS_FILE = 'credentials.json' # ไฟล์นี้จะถูกสร้างตอนรันบน Server
+CREDS_FILE = 'credentials.json'
 
-genai.configure(api_key=GENAI_API_KEY)
+# ตั้งค่า AI
+if GENAI_API_KEY:
+    genai.configure(api_key=GENAI_API_KEY)
+
+# ================= FUNCTIONS =================
+
+def send_telegram(message):
+    """ฟังก์ชันส่งข้อความเข้า Telegram"""
+    try:
+        url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
+        payload = {
+            "chat_id": CHAT_ID,
+            "text": message,
+            "parse_mode": "Markdown",
+            "disable_web_page_preview": False
+        }
+        response = requests.post(url, json=payload)
+        if response.status_code == 200:
+            print("✅ ส่ง Telegram สำเร็จ")
+        else:
+            print(f"❌ ส่ง Telegram พลาด: {response.text}")
+    except Exception as e:
+        print(f"❌ Error send_telegram: {e}")
 
 def get_sheet():
-    scope = ["https://spreadsheets.google.com/feeds", "https://www.googleapis.com/auth/drive"]
-    creds = ServiceAccountCredentials.from_json_keyfile_name(CREDS_FILE, scope)
-    client = gspread.authorize(creds)
-    return client.open(SHEET_NAME).sheet1
+    """เชื่อมต่อ Google Sheet"""
+    try:
+        scope = ["https://spreadsheets.google.com/feeds", "https://www.googleapis.com/auth/drive"]
+        creds = ServiceAccountCredentials.from_json_keyfile_name(CREDS_FILE, scope)
+        client = gspread.authorize(creds)
+        return client.open(SHEET_NAME).sheet1
+    except Exception as e:
+        print(f"❌ เชื่อมต่อ Google Sheet ไม่ได้: {e}")
+        return None
 
-def send_alert(msg):
-    url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
-    payload = {"chat_id": CHAT_ID, "text": msg, "parse_mode": "Markdown"}
-    requests.post(url, json=payload)
-
-def search_posts():
-    print("🔍 Scanning Social Media...")
+def search_social_media():
+    """ค้นหาโพสต์ด้วย DuckDuckGo"""
+    print("🔍 กำลังสแกนหาข่าว...")
     results = []
-    # ใช้ Dorks ค้นหา 1 วันล่าสุด (range:1d)
+    
+    # Keyword ค้นหา (ลองปรับให้กว้างขึ้นเพื่อทดสอบการเจอข้อมูล)
     keywords = [
         'site:facebook.com "น้ำท่วม" "ช่วยด้วย" range:1d',
-        'site:twitter.com "น้ำท่วมภาคใต้" "ช่วยด้วย" range:1d',
-        'site:instagram.com "น้ำท่วม" "ช่วยด้วย" range:1d'
+        'site:twitter.com "น้ำท่วม" "ช่วยด้วย" range:1d',
+        '"น้ำท่วม" "ขอความช่วยเหลือ" "ติดอยู่" range:1d' 
     ]
-    with DDGS() as ddgs:
-        for query in keywords:
-            try:
-                res = ddgs.text(query, region='th-th', max_results=5)
-                if res:
-                    for item in res:
+
+    try:
+        with DDGS() as ddgs:
+            for query in keywords:
+                print(f"   ...ค้นหาคีย์เวิร์ด: {query}")
+                # max_results=5 เพื่อความเร็ว
+                search_res = ddgs.text(query, region='wt-wt', max_results=5) 
+                
+                if search_res:
+                    for item in search_res:
                         results.append({
                             "id": item['href'],
                             "text": f"{item['title']} : {item['body']}",
                             "url": item['href']
                         })
-                time.sleep(1)
-            except:
-                pass
+                time.sleep(1) # พักหายใจกันโดนบล็อก
+    except Exception as e:
+        print(f"⚠️ ค้นหาล้มเหลว (อาจโดน Rate Limit): {e}")
+        
+    print(f"📥 เจอทั้งหมด: {len(results)} โพสต์")
     return results
 
-def analyze_ai(text):
-    model = genai.GenerativeModel('gemini-1.5-flash')
-    prompt = f"""
-    Analyze text: "{text}"
-    Is this a real flood rescue request? Extract Location, Contact, Needs.
-    Return JSON only: {{"is_rescue": bool, "location": str, "contact": str, "needs": str}}
-    """
-    try:
-        res = model.generate_content(prompt)
-        return eval(res.text.replace('```json','').replace('```',''))
-    except:
+def analyze_with_ai(text):
+    """วิเคราะห์ด้วย Gemini"""
+    if not GENAI_API_KEY:
+        print("⚠️ ไม่พบ GENAI_API_KEY ข้ามการวิเคราะห์")
         return None
 
-def main():
+    model = genai.GenerativeModel('gemini-1.5-flash')
+    prompt = f"""
+    Analyze this text related to flood rescue.
+    Text: "{text}"
+    
+    1. Is this a Request for Help? (YES/NO) - Ignore news, donations, or general complaints.
+    2. Extract: Location, Contact, Needs.
+    
+    Return JSON only:
+    {{
+        "is_rescue": true/false,
+        "location": "...",
+        "contact": "...",
+        "needs": "..."
+    }}
+    """
     try:
-        sheet = get_sheet()
-        existing = sheet.col_values(1)
-        posts = search_posts()
-        
-        for post in posts:
-            if post['id'] in existing: continue
-            
-            data = analyze_ai(post['text'])
-            if data and data.get('is_rescue'):
-                timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-                row = [post['id'], timestamp, post['text'], data.get('location'), data.get('contact'), data.get('needs'), "New"]
-                sheet.append_row(row)
-                
-                msg = f"🆘 **NEW ALERT**\n📍 {data.get('location')}\n🗣 {data.get('needs')}\n🔗 {post['url']}"
-                send_alert(msg)
-                time.sleep(1)
+        response = model.generate_content(prompt)
+        # Clean Markdown formatting
+        clean_json = response.text.replace('```json', '').replace('```', '').strip()
+        return eval(clean_json)
     except Exception as e:
-        print(f"Error: {e}")
+        print(f"⚠️ AI Error: {e}")
+        return None
+
+# ================= MAIN LOOP =================
+
+def main():
+    print("🚀 เริ่มต้นระบบ Flood Rescue Bot V2.0")
+    
+    # ---------------------------------------------------------
+    # 1. TEST CONNECTION (ทดสอบส่งข้อความทันทีเมื่อรัน)
+    # ถ้าเห็นข้อความนี้ในมือถือ แปลว่า Chat ID / Token ถูกต้องแน่นอน
+    # ---------------------------------------------------------
+    print("🧪 กำลังส่งข้อความทดสอบระบบ...")
+    send_telegram(f"✅ **SYSTEM CHECK:** บอทเริ่มทำงานแล้ว ณ เวลา {datetime.now().strftime('%H:%M:%S')}\n(ถ้าเห็นข้อความนี้แสดงว่าการเชื่อมต่อถูกต้องครับ)")
+
+    # 2. เตรียม Google Sheet
+    sheet = get_sheet()
+    existing_ids = []
+    if sheet:
+        try:
+            existing_ids = sheet.col_values(1) # อ่าน ID ที่เคยส่งแล้ว
+            print(f"📚 ฐานข้อมูลเดิมมี: {len(existing_ids)} รายการ")
+        except:
+            print("⚠️ อ่าน Sheet ไม่ได้ อาจเป็นชีทเปล่า")
+
+    # 3. เริ่มค้นหา
+    posts = search_social_media()
+
+    # 4. วนลูปวิเคราะห์
+    for post in posts:
+        # ข้ามถ้าเคยส่งแล้ว
+        if post['id'] in existing_ids:
+            continue
+            
+        print(f"🤖 AI กำลังอ่าน: {post['url']}")
+        analysis = analyze_with_ai(post['text'])
+
+        if analysis and analysis.get('is_rescue'):
+            print(f"🚨 >> เจอเคสช่วยเหลือ! ที่: {analysis.get('location')}")
+            
+            # เตรียมข้อมูล
+            loc = analysis.get('location') or "ไม่ระบุ"
+            con = analysis.get('contact') or "-"
+            need = analysis.get('needs') or "-"
+            timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+            # ส่ง Alert
+            msg = (
+                f"🆘 **NEW RESCUE CASE**\n"
+                f"📍 **พิกัด:** {loc}\n"
+                f"🗣 **ต้องการ:** {need}\n"
+                f"📞 **ติดต่อ:** {con}\n"
+                f"🔗 **ต้นทาง:** [คลิกดูโพสต์]({post['url']})"
+            )
+            send_telegram(msg)
+            
+            # บันทึกลง Sheet
+            if sheet:
+                try:
+                    sheet.append_row([post['id'], timestamp, post['text'], loc, con, need, "Sent"])
+                    print("💾 บันทึกลง Sheet เรียบร้อย")
+                except Exception as e:
+                    print(f"❌ บันทึก Sheet ไม่ได้: {e}")
+            
+            time.sleep(1) # กัน Telegram บล็อกเพราะส่งรัว
+        else:
+            print("   -> ไม่ใช่เคสช่วยเหลือ (ข้าม)")
+
+    print("🏁 จบการทำงานรอบนี้")
 
 if __name__ == "__main__":
-
     main()
-
-    # ... (โค้ดส่วนบนเหมือนเดิม)
-
-def main():
-    try:
-        sheet = get_sheet()
-        
-        # =========== โซนทดสอบ (TEST ZONE) ===========
-        print("🧪 กำลังทดสอบระบบ...")
-        # 1. ลองส่งเข้า Telegram เลย
-        send_alert("✅ **SYSTEM CHECK:** บอทเริ่มทำงานแล้วครับ (Test Message)")
-        
-        # 2. ลองยัดข้อมูลจำลอง 1 เคส (ไม่ต้องรอ Search เจอ)
-        dummy_text = "ทดสอบระบบ: ช่วยด้วย น้ำท่วมบ้านเลขที่ 999 หาดใหญ่ ติดต่อ 081-111-2222"
-        print("🤖 กำลังทดสอบ AI...")
-        data = analyze_ai(dummy_text) # ให้ AI ลองวิเคราะห์ข้อความปลอมนี้
-        
-        if data:
-            print(f"ผลการวิเคราะห์ AI: {data}")
-            # ลองบันทึกลง Sheet
-            sheet.append_row(["TEST-001", "2025-11-25", dummy_text, "Test Loc", "Test Contact", "Test Needs", "TEST"])
-            print("📝 บันทึกลง Google Sheet สำเร็จ!")
-        # ============================================
-
-        # ... (โค้ด Search ของเดิมอยู่ข้างล่างนี้)
-        existing = sheet.col_values(1)
-        # ...
