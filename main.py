@@ -7,9 +7,7 @@ from datetime import datetime
 from duckduckgo_search import DDGS
 import os
 
-# ==================== 1. ตั้งค่าระบบ (ใส่ Key ของคุณ) ====================
-# ถ้าคุณรันในคอมตัวเอง ให้ใส่ Key ตรงๆ ในเครื่องหมาย '' ได้เลย
-# แต่ถ้ารันบน GitHub Actions ให้ใช้ os.getenv เหมือนเดิม
+# ==================== SETTINGS ====================
 TELEGRAM_TOKEN = os.getenv('TELEGRAM_TOKEN', 'ใส่_TOKEN_ของคุณ_ถ้า_รันในคอม')
 CHAT_ID = os.getenv('CHAT_ID', 'ใส่_CHAT_ID_ของคุณ_ถ้า_รันในคอม')
 GENAI_API_KEY = os.getenv('GENAI_API_KEY', 'ใส่_GEMINI_KEY_ของคุณ_ถ้า_รันในคอม')
@@ -17,44 +15,37 @@ GENAI_API_KEY = os.getenv('GENAI_API_KEY', 'ใส่_GEMINI_KEY_ของคุ
 SHEET_NAME = 'Flood_Rescue_Data'
 CREDS_FILE = 'credentials.json'
 
-# ==================== 2. ฟังก์ชันระบบ ====================
 genai.configure(api_key=GENAI_API_KEY)
 
+# ==================== FUNCTIONS ====================
 def get_sheet():
-    """เชื่อมต่อ Google Sheet"""
     scope = ["https://spreadsheets.google.com/feeds", "https://www.googleapis.com/auth/drive"]
     creds = ServiceAccountCredentials.from_json_keyfile_name(CREDS_FILE, scope)
     client = gspread.authorize(creds)
     return client.open(SHEET_NAME).sheet1
 
 def send_alert(msg):
-    """ส่งแจ้งเตือนเข้า Telegram"""
-    print(f"Sending via Telegram: {msg}") # Print ใน Console ด้วย
+    # ฟังก์ชันส่งข้อความ Telegram แบบปลอดภัย (ไม่ Error ถ้ายิงรัว)
+    print(f">> Sending: {msg}")
     url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
-    payload = {"chat_id": CHAT_ID, "text": msg, "parse_mode": "Markdown"}
+    payload = {"chat_id": CHAT_ID, "text": msg, "parse_mode": "Markdown", "disable_web_page_preview": True}
     try:
         requests.post(url, json=payload)
     except Exception as e:
         print(f"Telegram Error: {e}")
 
 def search_flood_posts():
-    """ค้นหาโพสต์ (ปรับ Keyword ให้กว้างขึ้นเพื่อ Test ระบบ)"""
+    # ค้นหาแบบกว้างสุดๆ เพื่อให้เจอข้อมูลแน่นอน
     results = []
+    keywords = ['ข่าวน้ำท่วมภาคใต้', 'ช่วยด้วย น้ำท่วม'] # ใช้คำสั้นๆ เพื่อให้เจอชัวร์ๆ
     
-    # Keyword แบบกว้าง (เอา range:1d ออกก่อนเพื่อเช็คว่าดึงข้อมูลได้ไหม)
-    keywords = [
-        'site:twitter.com "น้ำท่วม" "ช่วยด้วย"',
-        'site:facebook.com "น้ำท่วม" "ช่วยเหลือ"',
-        'ข่าวน้ำท่วม ภาคใต้ ล่าสุด', # ลองดึงข่าวด้วย
-        'ขอความช่วยเหลือ น้ำท่วม'
-    ]
-
-    print("🔍 Searching...")
+    send_alert("🔍 ..กำลังกวาดข้อมูลจาก DuckDuckGo..")
+    
     with DDGS() as ddgs:
         for query in keywords:
             try:
-                # ลองดึงสัก 3-5 รายการต่อคำค้นหา
-                search_res = ddgs.text(query, region='th-th', max_results=5)
+                # ดึงแค่ 3 อันพอ เพื่อไม่ให้แชทระเบิดตอนเทส
+                search_res = ddgs.text(query, region='th-th', max_results=3) 
                 if search_res:
                     for item in search_res:
                         results.append({
@@ -62,28 +53,25 @@ def search_flood_posts():
                             "text": f"{item['title']} : {item['body']}",
                             "url": item['href']
                         })
-                time.sleep(1) 
             except Exception as e:
-                print(f"⚠️ Search Error ({query}): {e}")
-                
+                print(f"Search Error: {e}")
     return results
 
 def analyze_with_ai(text):
-    """ใช้ Gemini แยกแยะข้อมูล"""
+    # ปรับ Prompt ให้ "ยอมรับทุกอย่าง" (Accept All) เพื่อเทส Database
     model = genai.GenerativeModel('gemini-1.5-flash')
     prompt = f"""
-    Analyze this text related to floods in Thailand.
-    Text: "{text}"
+    Analyze this text: "{text}"
     
-    1. Is this related to a rescue request OR a flood situation report? (True/False)
-    2. Extract Location, Contact Number, and Needs.
+    Task: Extract data related to floods.
+    ALWAYS return "is_relevant": true for this test.
     
     Return JSON only:
     {{
         "is_relevant": true,
-        "location": "string or null",
-        "contact": "string or null",
-        "needs": "string or null"
+        "location": "Extract location or say 'General Area'",
+        "contact": "Extract phone or say '-'",
+        "needs": "Summarize topic briefly"
     }}
     """
     try:
@@ -93,61 +81,68 @@ def analyze_with_ai(text):
     except:
         return None
 
-# ==================== 3. การทำงานหลัก (Main Loop Debug Mode) ====================
+# ==================== MAIN DEBUG LOOP ====================
 def run_bot():
+    send_alert("🛠 **STARTING EXTREME DEBUG MODE** 🛠")
+    
+    # 1. ทดสอบเขียน Google Sheet ก่อนเลย
+    sheet = None
     try:
-        # 1. แจ้งเตือนเริ่มทำงาน
-        send_alert("🚀 เริ่มต้นกระบวนการค้นหา (Debug Mode)...")
-        
         sheet = get_sheet()
-        existing_ids = sheet.col_values(1) 
-        
-        posts = search_flood_posts()
-        
-        # 2. แจ้งจำนวนที่เจอ
-        send_alert(f"🔎 ค้นหาเจอทั้งหมด: {len(posts)} รายการ")
-        
-        if len(posts) == 0:
-            send_alert("⚠️ ไม่พบข้อมูลเลย (DuckDuckGo อาจหาไม่เจอ หรือไม่มีโพสต์ใหม่)")
-            return
-
-        count_new = 0
-        for post in posts:
-            if post['id'] in existing_ids:
-                continue # ข้าม
-
-            # ส่งไปให้ AI อ่าน
-            analysis = analyze_with_ai(post['text'])
-
-            if analysis and analysis.get('is_relevant'):
-                count_new += 1
-                
-                timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-                loc = analysis.get('location') or "-"
-                con = analysis.get('contact') or "-"
-                need = analysis.get('needs') or "-"
-                
-                # บันทึก
-                sheet.append_row([post['id'], timestamp, post['text'], loc, con, need, "New"])
-                
-                # แจ้งเตือน
-                msg = (
-                    f"🌊 **พบข้อมูลน้ำท่วม**\n"
-                    f"📍 **ที่อยู่:** {loc}\n"
-                    f"🗣 **รายละเอียด:** {need}\n"
-                    f"🔗 **Link:** [ต้นทาง]({post['url']})"
-                )
-                send_alert(msg)
-                print(f"✅ Sent alert for: {post['url']}")
-                time.sleep(1)
-            else:
-                print(f"❌ AI บอกว่าไม่เกี่ยว: {post['url']}")
-        
-        send_alert(f"✅ จบการทำงานรอบนี้ เพิ่มข้อมูลใหม่ {count_new} รายการ")
-                
+        timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        # เขียนบรรทัดทดสอบ
+        sheet.append_row(["TEST_CONNECTION", timestamp, "System Check Write", "Test Loc", "-", "-", "DEBUG_ROW"])
+        send_alert("✅ **Google Sheet Write Success!** (ตรวจสอบไฟล์ของคุณดูได้เลย)")
     except Exception as e:
-        send_alert(f"❌ System Error: {str(e)}")
-        print(f"Critical Error: {e}")
+        send_alert(f"❌ **Google Sheet Error:** เขียนไม่ได้!\nเหตุผล: `{str(e)}`")
+        return # ถ้าเขียนไม่ได้ ให้จบโปรแกรมเลย
+
+    # 2. เริ่มค้นหา
+    existing_ids = sheet.col_values(1)
+    posts = search_flood_posts()
+    send_alert(f"🔎 เจอข้อมูลดิบ: {len(posts)} รายการ")
+
+    if not posts:
+        send_alert("⚠️ ไม่เจอข้อมูล (Search Engine อาจบล็อกชั่วคราว)")
+        return
+
+    # 3. ลูปดูข้อมูลทีละอัน
+    for i, post in enumerate(posts):
+        # ส่งข้อมูลดิบเข้าแชทให้คุณดูก่อน
+        preview_msg = f"📄 **รายการที่ {i+1}**\nTitle: {post['text'][:100]}...\nLink: {post['url']}"
+        send_alert(preview_msg)
+        
+        # เช็คซ้ำ
+        if post['id'] in existing_ids:
+            send_alert("⏭ ข้าม (มีใน Database แล้ว)")
+            continue
+
+        # ให้ AI อ่าน
+        analysis = analyze_with_ai(post['text'])
+        
+        if analysis:
+            # บันทึกจริง
+            try:
+                ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                row = [
+                    post['id'], 
+                    ts, 
+                    post['text'][:200], # ตัดให้สั้นหน่อยกันรก
+                    analysis.get('location'), 
+                    analysis.get('contact'), 
+                    analysis.get('needs'), 
+                    "Analyzed"
+                ]
+                sheet.append_row(row)
+                send_alert(f"💾 **Saved to Sheet!**\nLoc: {analysis.get('location')}")
+            except Exception as e:
+                send_alert(f"❌ Save Error: {e}")
+        else:
+            send_alert("❌ AI Failed to parse JSON")
+            
+        time.sleep(2) # พักหายใจหน่อย
+
+    send_alert("🏁 **จบการทำงานรอบนี้**")
 
 if __name__ == "__main__":
     run_bot()
