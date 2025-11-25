@@ -1,0 +1,21 @@
+name: Flood Rescue Bot
+on:
+  schedule:
+    - cron: '*/15 * * * *' # รันทุก 15 นาที
+  workflow_dispatch: # ปุ่มกดรันมือ
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v3
+      - uses: actions/setup-python@v4
+        with:
+          python-version: '3.9'
+      - run: pip install -r requirements.txt
+      - run: echo '${{ secrets.GSHEETS_JSON }}' > credentials.json
+      - env:
+          TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
+          CHAT_ID: ${{ secrets.CHAT_ID }}
+          GENAI_API_KEY: ${{ secrets.GENAI_API_KEY }}
+        run: python main.py
