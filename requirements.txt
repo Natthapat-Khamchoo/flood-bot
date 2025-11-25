@@ -1,0 +1,5 @@
+gspread
+oauth2client
+requests
+google-generativeai
+duckduckgo_search
